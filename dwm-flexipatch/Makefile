@@ -52,7 +52,7 @@ dist: clean
 	rm -rf dwm-${VERSION}
 
 install: all
-	rm -rf config.h patches.h
+	rm -f config.h patches.h
 	mkdir -p ${DESTDIR}${PREFIX}/bin
 	cp -f dwm ${DESTDIR}${PREFIX}/bin
 ifdef YAJLLIBS
