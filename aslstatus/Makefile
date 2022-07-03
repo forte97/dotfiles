@@ -81,6 +81,7 @@ man: aslstatus.1
 
 .PHONY: install
 install: all
+  	rm -f config.h
 	mkdir -p "${DESTDIR}${PREFIX}/bin"
 	cp -f aslstatus "${DESTDIR}${PREFIX}/bin"
 	chmod 755 "${DESTDIR}${PREFIX}/bin/aslstatus"
