@@ -33,7 +33,7 @@ static struct arg_t args[] = {
 /* { bspwm_ws,		" [ %s ]%%{r}",	NULL,		0,	END }, */
 #endif
         { uptime,   "^B8^^C15^Up: %s ",	 NULL,	1 _MIN,	END},
-        { run_command, "^B15^^C8^  : %s ",	 "nmcli con show -a | awk -F '  ' NR==2'{print $1}'",	30 _SEC,	END},
+        { run_command, "^B15^^C8^  : %s ",	 "nmcli con show -a | awk -F '  ' NR==2'{print $1}'",	45 _SEC,	END},
         { netspeed_rx, "^B8^^C15^   %sB/s  ",	"enp5s0",	2 _SEC,	END}, 
         { run_command, "^B15^^C8^ 墳: %s%% ",	 "pamixer --get-volume",		2 _SEC,		END},
         { cpu_perc, "^B8^^C15^  CPU: %s%% ",     	 NULL,	2 _SEC,	END},
