@@ -63,6 +63,9 @@ nitrogen --restore &
 #ASLSTATUS
 aslstatus &
 
+#UDISKIE
+udiskie &
+
 #LOOP
 while true; do
     dwm >/dev/null 2>&1
