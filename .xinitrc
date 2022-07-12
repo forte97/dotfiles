@@ -48,6 +48,10 @@ if [ -d /etc/X11/xinit/xinitrc.d ] ; then
  unset f
 fi
 
+#DISABLE DPMS
+xset -dpms
+xset s off
+
 #DISPLAY
 xrandr --output DisplayPort-0 --mode 1920x1080 --rate 144 &
 
@@ -64,8 +68,8 @@ nitrogen --restore &
 aslstatus &
 
 #LOOP
-while true; do
-    dwm >/dev/null 2>&1
-done
+#while true; do
+#    dwm >/dev/null 2>&1
+#done
 #DWM
 exec dwm
