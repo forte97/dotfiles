@@ -32,14 +32,13 @@ static struct arg_t args[] = {
 #if USE_X
 /* { bspwm_ws,		" [ %s ]%%{r}",	NULL,		0,	END }, */
 #endif
-        { uptime,   "^B8^^C15^Up: %s ",	 NULL,	1 _MIN,	END},
-        { run_command, "^B15^^C8^  : %s ",	 "nmcli con show -a | awk -F '  ' NR==2'{print $1}'",	45 _SEC,	END},
-        { netspeed_rx, "^B8^^C15^   %sB/s  ",	"enp5s0",	2 _SEC,	END}, 
-        { run_command, "^B15^^C8^ 墳: %s%% ",	 "pamixer --get-volume",		2 _SEC,		END},
-        { cpu_perc, "^B8^^C15^  CPU: %s%% ",     	 NULL,	2 _SEC,	END},
-        { ram_used, "^B15^^C8^  RAM: %sB ",        NULL,	5 _SEC, END},
-        { datetime, "^B8^^C15^  %s ",          	 "%b %d %a",	1 _MIN,	END},
-        { datetime, "^B15^^C8^  %s  ",		 "%I:%M %p",     1 _SEC,	END},
+        { uptime,   "^B8^^C15^Up: %s ",	 NULL, 1 _MIN, END},
+        { netspeed_rx, "^B15^^C8^   %sB/s  ", "enp5s0", 2 _SEC, END}, 
+        { run_command, "^B8^^C15^ 墳: %s%% ", "pamixer --get-volume", 2 _SEC, END},
+        { cpu_perc, "^B15^^C8^  CPU: %s%% ",   NULL, 2 _SEC, END},
+        { ram_used, "^B8^^C15^  RAM: %sB ",    NULL, 2 _SEC, END},
+        { datetime, "^B15^^C8^  %s ", "%b %d %a", 1 _MIN, END},
+        { datetime, "^B8^^C15^  %s  ", "%I:%M %p", 1 _SEC, END},
 
 #if USE_X && USE_XKB
 /* { keymap,		"-[ %s] ",	NULL,		 0,	END }, */

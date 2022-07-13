@@ -12,7 +12,8 @@
 #	include "../X.h"
 #endif
 
-#include "../util.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
 #include "../components_config.h"
 
 #ifndef KEYMAP_NUMLOCK
@@ -35,38 +36,38 @@ static uint8_t init_xkb_extension(xcb_connection_t *);
 static uint8_t get_layout_struct(xcb_connection_t *, struct layout *);
 
 void
-keymap(char *	  layout,
-       const char __unused * _a,
-       unsigned int __unused _i,
-       void *		     static_ptr)
+keymap(char		    *layout,
+       const char __unused *_a,
+       uint32_t __unused    _i,
+       static_data_t	     *static_data)
 {
 	void *ev = NULL;
 
 	struct layout state;
 
-	uint8_t *event_initialized = static_ptr;
+	uint8_t *event_initialized = static_data->data;
 
 	if (!*event_initialized) {
-		if (!init_xkb_extension(c)) {
+		if (!init_xkb_extension(X_CONNECTION)) {
 			warnx("xcb: failed to initialize xkb extension");
 			ERRRET(layout);
 		}
-		init_events(c);
+		init_events(X_CONNECTION);
 
 		*event_initialized = !0;
 	} else {
-		if (!(ev = xcb_wait_for_event(c))) {
+		if (!(ev = xcb_wait_for_event(X_CONNECTION))) {
 			warnx("xcb: failed to get xkb event");
 			ERRRET(layout);
 		}
 		free(ev);
 	}
 
-	if (!!get_layout_struct(c, &state)) ERRRET(layout);
+	if (!!get_layout_struct(X_CONNECTION, &state)) ERRRET(layout);
 
 	if (state.lock_mask & CAPS) {
-		state.group[0] = toupper(state.group[0]);
-		state.group[1] = toupper(state.group[1]);
+		SAFE_ASSIGN(state.group[0], toupper(state.group[0]));
+		SAFE_ASSIGN(state.group[1], toupper(state.group[1]));
 	}
 
 	bprintf(layout,
@@ -147,7 +148,7 @@ get_layout(char *syms, uint8_t grp_num)
 	for (grp = 0; tok && grp <= grp_num; tok = strtok(NULL, "+:")) {
 		if (!valid_layout_or_variant(tok)
 		    /* ignore :2, :3, :4 (additional layout groups) */
-		    || (strlen(tok) == 1 && isdigit(tok[0])))
+		    || (strlen(tok) == 1 && isdigit(*tok)))
 			continue;
 
 		layout = tok;
@@ -175,7 +176,7 @@ get_layout_struct(xcb_connection_t *c, struct layout *ret)
 			}                                                     \
 		} while (0)
 
-	char *	layout;
+	char   *layout;
 	uint8_t error = 0;
 
 	xcb_xkb_get_names_value_list_t names;
@@ -233,9 +234,17 @@ get_layout_struct(xcb_connection_t *c, struct layout *ret)
 	ret->group[2]  = '\0';
 
 	ret->lock_mask = 0;
-	ret->lock_mask |=
-	    CAPS * !!(state_reply->lockedMods & XCB_MOD_MASK_LOCK);
-	ret->lock_mask |= NUM * !!(state_reply->lockedMods & XCB_MOD_MASK_2);
+	/*
+	 * LM - Lock Mask
+	 * MM - Mod Mask
+	 */
+#	define check_mask(LM, MM)                                            \
+		(__typeof__(ret->lock_mask))((LM)                             \
+					     * !!(state_reply->lockedMods     \
+						  & (MM)))
+
+	ret->lock_mask |= check_mask(CAPS, XCB_MOD_MASK_LOCK);
+	ret->lock_mask |= check_mask(NUM, XCB_MOD_MASK_2);
 
 end:
 	free(atom_name);

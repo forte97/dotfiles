@@ -1,33 +1,80 @@
-/* See LICENSE file for copyright and license details. */
+#ifndef _ASLSTATUS_H
+#define _ASLSTATUS_H
 
-#include <limits.h>  /* PATH_MAX */
+#include <stdio.h>    /* FILE */
+#include <pthread.h>  /* PTHREAD_MUTEX_INITIALIZER */
+#include <inttypes.h> /* uintmax_t in cpu_perc */
 
 #if USE_X
-#include <xcb/xcb.h>
+#	include <xcb/xcb.h>
 #endif
 
-#include "os.h"
+#include "lib/util.h"
 
-#define FUNC_ARGS (char *, const char *, unsigned int, void *)
+#include "components/cpu.h"
+#include "components/wifi.h"
+#include "components/volume.h"
+#include "components/battery.h"
+#include "components/netspeed.h"
+#include "components/brightness.h"
 
+#define FUNC_ARGS (char *, const char *, uint32_t, static_data_t *)
 
-typedef struct _func_t {
-	void (*func) FUNC_ARGS;
+#define END                                                                   \
+	{                                                                     \
+		.pid = -1, .tid = 0, .data = { 0 },                           \
+		.static_data = { .cleanup = NULL, .data = NULL },             \
+		.mutex	     = PTHREAD_MUTEX_INITIALIZER                      \
+	}
+
+typedef void (*cleanup_func_t)(void *);
+
+typedef struct static_data_t {
+	cleanup_func_t cleanup;
+	void	     *data;
+} static_data_t;
+
+typedef void(*func_t) FUNC_ARGS;
+
+typedef struct func_data_t {
+	func_t	   func;
 	const char name[16];
-	unsigned int static_size;
-} func_t;
+	size_t	   static_size;
+} func_data_t;
 
+struct segment_t {
+	pid_t		pid;
+	pthread_t	tid;
+	char		data[BUFF_SZ];
+	static_data_t	static_data;
+	pthread_mutex_t mutex;
+};
+
+struct arg_t {
+	const func_data_t f;
+	const char	   *fmt;
+	const char	   *args;
+	const uint32_t	  interval;
+	struct segment_t  segment;
+};
+
+#ifdef ASLSTATUS_H_NEED_COMP
+/* clang-format off */
 
 /* battery */
 void battery_perc FUNC_ARGS;
-#define battery_perc {battery_perc, "batt_percentage", 0}
+#define battery_perc {battery_perc, "batt_percentage", sizeof(int)}
 
 void battery_state FUNC_ARGS;
-#define battery_state {battery_state, "batt_state", 0}
+#define battery_state {battery_state, "batt_state", sizeof(int)}
 
 void battery_remaining FUNC_ARGS;
-#define battery_remaining {battery_remaining, "batt_remaining", 0}
+#define battery_remaining \
+	{battery_remaining, "batt_remaining", sizeof(struct remaining)}
 
+/* brightness */
+void brightness FUNC_ARGS;
+#define brightness {brightness, "brightness", sizeof(struct brightness_data)}
 
 #if USE_X
 /* bspwm */
@@ -38,19 +85,10 @@ void bspwm_ws FUNC_ARGS;
 
 /* cpu */
 void cpu_freq FUNC_ARGS;
-#define cpu_freq {cpu_freq, "cpu_freq", 0}
+#define cpu_freq {cpu_freq, "cpu_freq", sizeof(int)}
 
 void cpu_perc FUNC_ARGS;
-#if ISBSD
-# include <sys/param.h>  /* CPUSTATES */
-#else
-# define CPUSTATES 1
-#endif
-#define cpu_perc {cpu_perc, "cpu_percentage", 0		\
-	+ (LINUX * sizeof(long double [7]))		\
-	+ (OBSD  * sizeof(uintmax_t   [CPUSTATES]))	\
-	+ (FBSD  * sizeof(long        [CPUSTATES]))	\
-}
+#define cpu_perc {cpu_perc, "cpu_percentage", sizeof(struct cpu_data_t)}
 
 /* datetime */
 void datetime FUNC_ARGS;
@@ -73,7 +111,7 @@ void disk_used FUNC_ARGS;
 
 /* entropy */
 void entropy FUNC_ARGS;
-#define entropy {entropy, "entropy", 0}
+#define entropy {entropy, "entropy", sizeof(int)}
 
 
 /* hostname */
@@ -108,10 +146,10 @@ void load_avg FUNC_ARGS;
 
 /* netspeeds */
 void netspeed_rx FUNC_ARGS;
-#define netspeed_rx {netspeed_rx, "netspeed_rx", sizeof(uintmax_t)}
+#define netspeed_rx {netspeed_rx, "netspeed_rx", sizeof(struct netspeed_data)}
 
 void netspeed_tx FUNC_ARGS;
-#define netspeed_tx {netspeed_tx, "netspeed_tx", sizeof(uintmax_t)}
+#define netspeed_tx {netspeed_tx, "netspeed_tx", sizeof(struct netspeed_data)}
 
 
 /* num_files */
@@ -121,43 +159,43 @@ void num_files FUNC_ARGS;
 
 /* ram */
 void ram_free FUNC_ARGS;
-#define ram_free {ram_free, "ram_free", 0}
+#define ram_free {ram_free, "ram_free", sizeof(int)}
 
 void ram_perc FUNC_ARGS;
-#define ram_perc {ram_perc, "ram_percentage", 0}
+#define ram_perc {ram_perc, "ram_percentage", sizeof(int)}
 
 void ram_total FUNC_ARGS;
 #define ram_total {ram_total, "ram_total", 0}
 
 void ram_used FUNC_ARGS;
-#define ram_used {ram_used, "ram_used", 0}
+#define ram_used {ram_used, "ram_used", sizeof(int)}
 
 
 /* run_command */
 void run_command FUNC_ARGS;
-#define run_command {run_command, "cmd", 0}
+#define run_command {run_command, "cmd", sizeof(pid_t)}
 /*
- * `cmd` thread name hardcodet to be used to run shell commands
+ * `cmd` thread name hardcoded to be used to run shell commands
  */
 
 
 /* swap */
 void swap_free FUNC_ARGS;
-#define swap_free {swap_free, "swap_free", 0}
+#define swap_free {swap_free, "swap_free", sizeof(int)}
 
 void swap_perc FUNC_ARGS;
-#define swap_perc {swap_perc, "swap_percentage", 0}
+#define swap_perc {swap_perc, "swap_percentage", sizeof(int)}
 
 void swap_total FUNC_ARGS;
 #define swap_total {swap_total, "swap_total", 0}
 
 void swap_used FUNC_ARGS;
-#define swap_used {swap_used, "swap_used", 0}
+#define swap_used {swap_used, "swap_used", sizeof(int)}
 
 
 /* temperature */
 void temp FUNC_ARGS;
-#define temp {temp, "temperature", LINUX * sizeof(char) * PATH_MAX}
+#define temp {temp, "temperature", sizeof(int)}
 
 
 /* uptime */
@@ -177,14 +215,18 @@ void username FUNC_ARGS;
 
 
 /* volume */
-#include "components/volume/volume.h"
 void vol_perc FUNC_ARGS;
 #define vol_perc {vol_perc, "volume", VOLUME_STATIC_SIZE}
 
 
 /* wifi */
 void wifi_perc FUNC_ARGS;
-#define wifi_perc {wifi_perc, "wifi_percentage", 0}
+#define wifi_perc {wifi_perc, "wifi_percentage", sizeof(struct wifi_perc_data)}
 
 void wifi_essid FUNC_ARGS;
-#define wifi_essid {wifi_essid, "wifi_essid", 0}
+#define wifi_essid {wifi_essid, "wifi_essid", sizeof(struct wifi_essid_data)}
+
+/* clang-format on */
+#endif /* ASLSTATUS_H_NO_COMP */
+
+#endif /* _ASLSTATUS_H */

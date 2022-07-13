@@ -3,13 +3,13 @@
 #include <stdio.h>
 #include <err.h>
 
-#include "../util.h"
+#include "../lib/util.h"
 
 void
-kernel_release(char *	  out,
-	       const char __unused * _a,
-	       unsigned int __unused _i,
-	       void __unused *_p)
+kernel_release(char		    *out,
+	       const char __unused *_a,
+	       uint32_t __unused    _i,
+	       void __unused	     *_p)
 {
 	struct utsname udata;
 

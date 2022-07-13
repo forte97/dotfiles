@@ -1,270 +1,95 @@
-/* See LICENSE file for copyright and license details. */
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/param.h> /* MIN */
+#include <sys/sysinfo.h>
 
-#include "../util.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
+#include "../lib/meminfo.h"
 
-#if defined(__linux__)
-#	include <stdint.h>
+#define DEF_RAM(STRUCT, STATIC, OUT)                                          \
+	int*		   fd	  = (STATIC)->data;                           \
+	struct meminfo_ram STRUCT = MEMINFO_INIT_RAM;                         \
+	if (!(STATIC)->cleanup) (STATIC)->cleanup = fd_cleanup;               \
+	if (!MEMINFO_FD(fd)) ERRRET(OUT);                                     \
+	if (!get_meminfo_ram(*fd, &STRUCT)) ERRRET(OUT)
+
+static inline memory_t get_used(const struct meminfo_ram* info);
 
 void
-ram_free(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+ram_free(char*		      out,
+	 const char __unused* _a,
+	 uint32_t __unused    _i,
+	 static_data_t*	      static_data)
 {
-	uintmax_t free;
+	DEF_RAM(info, static_data, out);
 
-	if (pscanf("/proc/meminfo",
-		   "MemTotal: %ju kB\n"
-		   "MemFree: %ju kB\n"
-		   "MemAvailable: %ju kB\n",
-		   &free,
-		   &free,
-		   &free)
-	    != 3) {
-		ERRRET(out);
-	}
-
-	fmt_human(out, free * 1024, 1024);
+	fmt_human(
+	    out,
+	    (info.available ? MIN(info.available, info.total) : info.free)
+		* 1024);
 }
 
 void
-ram_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+ram_perc(char*		      out,
+	 const char __unused* _a,
+	 uint32_t __unused    _i,
+	 static_data_t*	      static_data)
 {
-	uintmax_t free, total, cached, buffers;
+	DEF_RAM(info, static_data, out);
 
-	if (pscanf("/proc/meminfo",
-		   "MemTotal: %ju kB\n"
-		   "MemFree: %ju kB\n"
-		   "MemAvailable: %ju kB\n"
-		   "Buffers: %ju kB\n"
-		   "Cached: %ju kB\n",
-		   &total,
-		   &free,
-		   &buffers,
-		   &buffers,
-		   &cached)
-	    != 5)
-		ERRRET(out);
-
-	if (!total) ERRRET(out);
+	if (!info.total) ERRRET(out);
 
 	bprintf(out,
-		"%d",
-		100 * ((total - free) - (buffers + cached)) / total);
+		"%" PRIperc,
+		(percent_t)(100 * get_used(&info) / info.total));
 }
 
 void
-ram_total(char *     out,
-	  const char __unused * _a,
-	  unsigned int __unused _i,
-	  void __unused *_p)
+ram_total(char*		       out,
+	  const char __unused* _a,
+	  uint32_t __unused    _i,
+	  void __unused*       _p)
 {
-	uintmax_t total;
+	struct sysinfo info;
+	if (!!sysinfo(&info)) ERRRET(out);
 
-	if (pscanf("/proc/meminfo", "MemTotal: %ju kB\n", &total) != 1)
-		ERRRET(out);
-
-	fmt_human(out, total * 1024, 1024);
+	fmt_human(out, info.totalram * info.mem_unit);
 }
 
 void
-ram_used(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+ram_used(char*		      out,
+	 const char __unused* _a,
+	 uint32_t __unused    _i,
+	 static_data_t*	      static_data)
 {
-	uintmax_t free, total, cached, buffers;
+	DEF_RAM(info, static_data, out);
 
-	if (pscanf("/proc/meminfo",
-		   "MemTotal: %ju kB\n"
-		   "MemFree: %ju kB\n"
-		   "MemAvailable: %ju kB\n"
-		   "Buffers: %ju kB\n"
-		   "Cached: %ju kB\n",
-		   &total,
-		   &free,
-		   &buffers,
-		   &buffers,
-		   &cached)
-	    != 5)
-		ERRRET(out);
-
-	fmt_human(out, (total - free - buffers - cached) * 1024, 1024);
-}
-#elif defined(__OpenBSD__)
-#	include <stdlib.h>
-#	include <unistd.h>
-#	include <sys/types.h>
-#	include <sys/sysctl.h>
-
-#	define LOG1024 10
-#	define pagetok(size, pageshift)                                      \
-		(size_t)(size << (pageshift - LOG1024))
-
-static inline int
-load_uvmexp(struct uvmexp *uvmexp)
-{
-	size_t size;
-	int    uvmexp_mib[] = { CTL_VM, VM_UVMEXP };
-
-	size		    = sizeof(*uvmexp);
-
-	if (sysctl(uvmexp_mib, 2, uvmexp, &size, NULL, 0) >= 0) return 1;
-
-	return 0;
+	fmt_human(out, get_used(&info) * 1024);
 }
 
-void
-ram_free(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+static inline memory_t
+get_used(const struct meminfo_ram* info)
 {
-	int	      free_pages;
-	struct uvmexp uvmexp;
+	/*
+	 * see procps(free):
+	 * https://gitlab.com/procps-ng/procps/-/blob/master/proc/sysinfo.c
+	 *
+	 * and htop:
+	 * https://github.com/htop-dev/htop/blob/master/linux/LinuxProcessList.c
+	 */
 
-	if (load_uvmexp(&uvmexp)) {
-		free_pages = uvmexp.npages - uvmexp.active;
-		fmt_human(out,
-			  pagetok(free_pages, uvmexp.pageshift) * 1024,
-			  1024);
-	}
+	const memory_t diff =
+	    info->free
+	    + (info->cached + info->reclaimable - info->shared
+	       /*
+		* Adjustments:
+		*  - Shmem in part of Cached
+		*  https://lore.kernel.org/patchwork/patch/648763/
+		*/
+	       )
+	    + info->buffers;
 
-	ERRRET(out);
+	return (info->total >= diff) ? info->total - diff
+				     : info->total - info->free;
 }
-
-void
-ram_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	struct uvmexp uvmexp;
-	int	      percent;
-
-	if (load_uvmexp(&uvmexp)) {
-		percent = uvmexp.active * 100 / uvmexp.npages;
-		bprintf(out, "%d", percent);
-	}
-
-	ERRRET(out);
-}
-
-void
-ram_total(char *     out,
-	  const char __unused * _a,
-	  unsigned int __unused _i,
-	  void __unused *_p)
-{
-	struct uvmexp uvmexp;
-
-	if (load_uvmexp(&uvmexp))
-		fmt_human(out,
-			  pagetok(uvmexp.npages, uvmexp.pageshift) * 1024,
-			  1024);
-
-	ERRRET(out);
-}
-
-void
-ram_used(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	struct uvmexp uvmexp;
-
-	if (load_uvmexp(&uvmexp))
-		fmt_human(out,
-			  pagetok(uvmexp.active, uvmexp.pageshift) * 1024,
-			  1024);
-
-	ERRRET(out);
-}
-#elif defined(__FreeBSD__)
-#	include <unistd.h>
-#	include <sys/sysctl.h>
-#	include <sys/vmmeter.h>
-#	include <vm/vm_param.h>
-
-void
-ram_free(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	size_t	       len;
-	struct vmtotal vm_stats;
-	int	       mib[] = { CTL_VM, VM_TOTAL };
-
-	len		     = sizeof(struct vmtotal);
-	if (sysctl(mib, 2, &vm_stats, &len, NULL, 0) == -1 || !len)
-		ERRRET(out);
-
-	fmt_human(out, vm_stats.t_free * getpagesize(), 1024);
-}
-
-void
-ram_total(char *     out,
-	  const char __unused * _a,
-	  unsigned int __unused _i,
-	  void __unused *_p)
-{
-	size_t	 len;
-	long int npages;
-
-	len = sizeof(npages);
-	if (sysctlbyname("vm.stats.vm.v_page_count", &npages, &len, NULL, 0)
-		== -1
-	    || !len)
-		ERRRET(out);
-
-	fmt_human(out, npages * getpagesize(), 1024);
-}
-
-void
-ram_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	size_t	 len;
-	long int npages;
-	long int active;
-
-	len = sizeof(npages);
-	if (sysctlbyname("vm.stats.vm.v_page_count", &npages, &len, NULL, 0)
-		== -1
-	    || !len)
-		ERRRET(out);
-
-	if (sysctlbyname("vm.stats.vm.v_active_count", &active, &len, NULL, 0)
-		== -1
-	    || !len)
-		ERRRET(out);
-
-	bprintf(out, "%d", active * 100 / npages);
-}
-
-void
-ram_used(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	size_t	 len;
-	long int active;
-
-	len = sizeof(active);
-	if (sysctlbyname("vm.stats.vm.v_active_count", &active, &len, NULL, 0)
-		== -1
-	    || !len)
-		ERRRET(out);
-
-	fmt_human(out, active * getpagesize(), 1024);
-}
-#endif

@@ -3,13 +3,10 @@
 #include <stdio.h>
 #include <sys/statvfs.h>
 
-#include "../util.h"
+#include "../lib/util.h"
 
 void
-disk_free(char *		out,
-	  const char *		path,
-	  unsigned int __unused _i,
-	  void __unused *_p)
+disk_free(char *out, const char *path, uint32_t __unused _i, void __unused *_p)
 {
 	struct statvfs fs;
 
@@ -18,14 +15,11 @@ disk_free(char *		out,
 		ERRRET(out);
 	}
 
-	fmt_human(out, fs.f_frsize * fs.f_bavail, 1024);
+	fmt_human(out, fs.f_frsize * fs.f_bavail);
 }
 
 void
-disk_perc(char *		out,
-	  const char *		path,
-	  unsigned int __unused _i,
-	  void __unused *_p)
+disk_perc(char *out, const char *path, uint32_t __unused _i, void __unused *_p)
 {
 	struct statvfs fs;
 
@@ -36,15 +30,16 @@ disk_perc(char *		out,
 
 	bprintf(
 	    out,
-	    "%d",
-	    (int)(100 * (1.0f - ((float)fs.f_bavail / (float)fs.f_blocks))));
+	    "%" PRIperc,
+	    (percent_t)(100
+			* (1.0f - ((float)fs.f_bavail / (float)fs.f_blocks))));
 }
 
 void
-disk_total(char *		 out,
-	   const char *		 path,
-	   unsigned int __unused _i,
-	   void __unused *_p)
+disk_total(char		*out,
+	   const char	      *path,
+	   uint32_t __unused _i,
+	   void __unused	 *_p)
 {
 	struct statvfs fs;
 
@@ -53,14 +48,11 @@ disk_total(char *		 out,
 		ERRRET(out);
 	}
 
-	fmt_human(out, fs.f_frsize * fs.f_blocks, 1024);
+	fmt_human(out, fs.f_frsize * fs.f_blocks);
 }
 
 void
-disk_used(char *		out,
-	  const char *		path,
-	  unsigned int __unused _i,
-	  void __unused *_p)
+disk_used(char *out, const char *path, uint32_t __unused _i, void __unused *_p)
 {
 	struct statvfs fs;
 
@@ -69,5 +61,5 @@ disk_used(char *		out,
 		ERRRET(out);
 	}
 
-	fmt_human(out, fs.f_frsize * (fs.f_blocks - fs.f_bfree), 1024);
+	fmt_human(out, fs.f_frsize * (fs.f_blocks - fs.f_bfree));
 }

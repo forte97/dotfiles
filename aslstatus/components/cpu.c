@@ -1,185 +1,117 @@
-/* See LICENSE file for copyright and license details. */
 #include <err.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/param.h> /* MIN, MAX */
 
-#include "../util.h"
+#include "cpu.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
+#include "../components_config.h"
 
-#if defined(__linux__)
+/* clang-format off */
+#define CPU_SUM(X)                                                            \
+	(X[CPU_STATE_USER]                                                    \
+	 + X[CPU_STATE_NICE]                                                  \
+	 + X[CPU_STATE_SYSTEM]                                                \
+	 + X[CPU_STATE_IDLE]                                                  \
+	 + X[CPU_STATE_IOWAIT]                                                \
+	 + X[CPU_STATE_IRQ]                                                   \
+	 + X[CPU_STATE_SOFTIRQ]                                               \
+	 + X[CPU_STATE_STEAL])
+
+#define CPU_USED(X)                                                           \
+	(X[CPU_STATE_USER]                                                    \
+	 + X[CPU_STATE_NICE]                                                  \
+	 + X[CPU_STATE_SYSTEM]                                                \
+	 + X[CPU_STATE_IRQ]                                                   \
+	 + X[CPU_STATE_SOFTIRQ]                                               \
+	 + X[CPU_STATE_STEAL])
+/* clang-format on */
+
+static void cpu_perc_cleanup(void *ptr);
+
 void
-cpu_freq(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+cpu_freq(char		      *out,
+	 const char __unused *_a,
+	 uint32_t __unused    _i,
+	 static_data_t       *static_data)
 {
 	uintmax_t freq;
+	int	    *fd = static_data->data;
+	char	  buf[JU_STR_SIZE];
+
+	if (!static_data->cleanup) static_data->cleanup = fd_cleanup;
+
+	if (!sysfs_fd_or_rewind(fd,
+				"/sys/devices/system/cpu",
+				"cpu0",
+				"cpufreq/scaling_cur_freq"))
+		ERRRET(out);
+
+	if (!eread(*fd, WITH_LEN(buf))) ERRRET(out);
 
 	/* in kHz */
-	if (pscanf("/sys/devices/system/cpu/cpu0/cpufreq/"
-		   "scaling_cur_freq",
-		   "%ju",
-		   &freq)
-	    != 1) {
-		ERRRET(out);
-	}
+	if (!esscanf(1, buf, "%ju", &freq)) ERRRET(out);
 
-	fmt_human(out, freq * 1000, 1000);
+	fmt_human(out, freq * 1000);
 }
 
 void
-cpu_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void *		       static_ptr)
+cpu_perc(char		      *out,
+	 const char __unused *_a,
+	 uint32_t __unused    _i,
+	 static_data_t       *static_data)
 {
-	long double  b[7], sum;
-	long double *a = static_ptr;
+	struct cpu_data_t *data = static_data->data;
 
-	memcpy(b, a, sizeof(b));
+	char buf[STR_SIZE("cpu ") + JU_STR_SIZE * LEN(data->states)];
+
+	__typeof__(*data->states) old_states[LEN(data->states)], sum;
+	__typeof__(sum)		  tmp_sum, old_sum;
+
+	if (!static_data->cleanup) static_data->cleanup = cpu_perc_cleanup;
+
+	memcpy(old_states, data->states, sizeof(data->states));
+
+	if (!sysfs_fd_or_rewind(&data->fd, "/", "proc", "stat")) ERRRET(out);
+
+	if (!eread(data->fd, WITH_LEN(buf))) ERRRET(out);
+
 	/* cpu user nice system idle iowait irq softirq */
-	if (pscanf("/proc/stat",
-		   "%*s %Lf %Lf %Lf %Lf %Lf %Lf %Lf",
-		   &a[0],
-		   &a[1],
-		   &a[2],
-		   &a[3],
-		   &a[4],
-		   &a[5],
-		   &a[6])
-	    != 7) {
+	if (!esscanf(LEN(data->states),
+		     buf,
+		     "cpu  %ju %ju %ju %ju %ju %ju %ju %ju",
+		     &data->states[CPU_STATE_USER],
+		     &data->states[CPU_STATE_NICE],
+		     &data->states[CPU_STATE_SYSTEM],
+		     &data->states[CPU_STATE_IDLE],
+		     &data->states[CPU_STATE_IOWAIT],
+		     &data->states[CPU_STATE_IRQ],
+		     &data->states[CPU_STATE_SOFTIRQ],
+		     &data->states[CPU_STATE_STEAL]))
 		ERRRET(out);
-	}
-	if (!b[0]) { ERRRET(out); }
 
-	sum = (b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6])
-	    - (a[0] + a[1] + a[2] + a[3] + a[4] + a[5] + a[6]);
+	if (!old_states[CPU_STATE_USER]) ERRRET(out);
+
+#define ABS_DEC(A, B) (MAX((A), (B)) - MIN((A), (B)))
+
+	old_sum = CPU_SUM(old_states);
+	tmp_sum = CPU_SUM(data->states);
+	sum	= ABS_DEC(old_sum, tmp_sum);
 
 	if (!sum) ERRRET(out);
 
-	bprintf(out,
-		"%d",
-		(int)(100
-		      * ((b[0] + b[1] + b[2] + b[5] + b[6])
-			 - (a[0] + a[1] + a[2] + a[5] + a[6]))
-		      / sum));
-}
-#elif defined(__OpenBSD__)
-#	include <sys/param.h>
-#	include <sys/sched.h>
-#	include <sys/sysctl.h>
-
-void
-cpu_freq(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
-{
-	int    freq, mib[2];
-	size_t size;
-
-	mib[0] = CTL_HW;
-	mib[1] = HW_CPUSPEED;
-
-	size   = sizeof(freq);
-
-	/* in MHz */
-	if (sysctl(mib, 2, &freq, &size, NULL, 0) < 0) {
-		warn("sysctl 'HW_CPUSPEED'");
-		ERRRET(out);
-	}
-
-	fmt_human(out, freq * 1E6, 1000);
-}
-
-void
-cpu_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void *		       static_ptr)
-{
-	int	   mib[2];
-	size_t	   size;
-	uintmax_t  sum, b[CPUSTATES];
-	uintmax_t *a = static_ptr;
-
-	mib[0]	     = CTL_KERN;
-	mib[1]	     = KERN_CPTIME;
-
-	size	     = sizeof(b);
-
-	memcpy(b, a, size);
-	if (sysctl(mib, 2, &a, &size, NULL, 0) < 0) {
-		warn("sysctl 'KERN_CPTIME'");
-		ERRRET(out);
-	}
-	if (!b[0]) ERRRET(out);
-
-	sum = (a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR] + a[CP_IDLE])
-	    - (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR] + b[CP_IDLE]);
-
-	if (!sum) ERRRET(out);
+	old_sum = CPU_USED(old_states);
+	tmp_sum = CPU_USED(data->states);
 
 	bprintf(out,
-		"%d",
-		100
-		    * ((a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR])
-		       - (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR]))
-		    / sum);
+		"%" PRIperc,
+		(percent_t)(100 * ABS_DEC(old_sum, tmp_sum) / sum));
 }
-#elif defined(__FreeBSD__)
-#	include <sys/param.h>
-#	include <sys/sysctl.h>
-#	include <devstat.h>
 
-void
-cpu_freq(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+static inline void
+cpu_perc_cleanup(void *ptr)
 {
-	int    freq;
-	size_t size;
-
-	size = sizeof(freq);
-	/* in MHz */
-	if (sysctlbyname("hw.clockrate", &freq, &size, NULL, 0) == -1
-	    || !size) {
-		warn("sysctlbyname 'hw.clockrate'");
-		ERRRET(out);
-	}
-
-	fmt_human(out, freq * 1E6, 1000);
+	eclose(((struct cpu_data_t *)ptr)->fd);
 }
-
-void
-cpu_perc(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void *		       static_ptr)
-{
-	size_t size;
-	long   sum, b[CPUSTATES];
-	long * a = static_ptr;
-
-	size	 = sizeof(b);
-	memcpy(b, a, size);
-	if (sysctlbyname("kern.cp_time", &a, &size, NULL, 0) == -1 || !size) {
-		warn("sysctlbyname 'kern.cp_time'");
-		ERRRET(out);
-	}
-	if (!b[0]) { ERRRET(out); }
-
-	sum = (a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR] + a[CP_IDLE])
-	    - (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR] + b[CP_IDLE]);
-
-	if (!sum) { ERRRET(out); }
-
-	bprintf(out,
-		"%d",
-		100
-		    * ((a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR])
-		       - (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR]))
-		    / sum);
-}
-#endif

@@ -1,271 +1,133 @@
-/* See LICENSE file for copyright and license details. */
 #include <err.h>
-#include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <ifaddrs.h>
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
-#include "../util.h"
+#include <linux/wireless.h>
 
-#define RSSI_TO_PERC(rssi) \
-			rssi >= -50 ? 100 : \
-			(rssi <= -100 ? 0 : \
-			(2 * (rssi + 100)))
+#include "wifi.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
 
-#if defined(__linux__)
-	#include <limits.h>
-	#include <linux/wireless.h>
+#define CLEANUP(X)                                                            \
+	static inline void wifi_##X##_cleanup(void *ptr)                      \
+	{                                                                     \
+		eclose(((struct wifi_##X##_data *)ptr)->common.sock);         \
+	}                                                                     \
+	struct trailing_semicolon
 
-	void
-	wifi_perc(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		int cur;
-		FILE *fp;
-		size_t i;
-		char
-			*p,
-			status[5],
-			*datastart,
-			path[PATH_MAX];
+#define eioctl(fd, req, arg) _eioctl(__func__, (fd), (req), #req, arg)
+static uint8_t _eioctl(const char	  *func,
+		       int		 fd,
+		       unsigned long int req,
+		       const char	  *str_req,
+		       void		    *arg);
 
-		if (esnprintf(path, sizeof(path), "/sys/class/net/%s"
-				"/operstate", interface) < 0)
-			ERRRET(out);
+#define esocket(socket, ...)                                                  \
+	((socket = _esocket(__func__, #__VA_ARGS__, __VA_ARGS__)) != -1)
+static int
+_esocket(const char *func, const char *args, int domain, int type, int proto);
 
-		if (!(fp = fopen(path, "r"))) {
-			warn("fopen '%s'", path);
-			ERRRET(out);
-		}
-		p = fgets(status, 5, fp);
-		fclose(fp);
-		if (!p || strcmp(status, "up\n") != 0)
-			ERRRET(out);
+#define SOCKET_INIT(DATA, OUT)                                                \
+	do {                                                                  \
+		if (!esocket((DATA)->common.sock, AF_INET, SOCK_DGRAM, 0))    \
+			ERRRET(OUT);                                          \
+	} while (0)
 
-		if (!(fp = fopen("/proc/net/wireless", "r"))) {
-			warn("fopen '/proc/net/wireless'");
-			ERRRET(out);
-		}
+static void wifi_perc_cleanup(void *ptr);
+static void wifi_essid_cleanup(void *ptr);
 
-		for (i = 0; i < 3; i++)
-			if (!(p = fgets(out, BUFF_SZ -1, fp)))
-				break;
+void
+wifi_perc(char	       *out,
+	  const char	     *interface,
+	  uint32_t __unused _i,
+	  static_data_t	*static_data)
+{
+	struct wifi_perc_data *data = static_data->data;
 
-		fclose(fp);
-		if (i < 2 || !p)
-			ERRRET(out);
+	if (!static_data->cleanup) static_data->cleanup = wifi_perc_cleanup;
 
-		if (!(datastart = strstr(out, interface)))
-			ERRRET(out);
+	if (data->common.sock <= 0) {
+		SOCKET_INIT(data, out);
 
-		datastart = (datastart+(strlen(interface)+1));
-		sscanf(datastart + 1, " %*d   %d  %*d  %*d\t\t  %*d\t   "
-		       "%*d\t\t%*d\t\t %*d\t  %*d\t\t %*d", &cur);
-
-		/* 70 is the max of /proc/net/wireless */
-		bprintf(out, "%d", (int)((float)cur / 70 * 100));
+		strncpy(data->common.req.ifr_name,
+			interface,
+			sizeof(data->common.req.ifr_name));
+		data->common.req.u.data.pointer = &data->stat;
+		data->common.req.u.data.length	= sizeof(data->stat);
 	}
 
-	void
-	wifi_essid(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		int sockfd;
-		struct iwreq wreq;
-		static char id[IW_ESSID_MAX_SIZE+1];
-
-		memset(&wreq, 0, sizeof(struct iwreq));
-		wreq.u.essid.length = IW_ESSID_MAX_SIZE+1;
-		if (esnprintf(wreq.ifr_name, sizeof(wreq.ifr_name), "%s",
-				interface) < 0)
-			ERRRET(out);
-
-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-			warn("socket 'AF_INET'");
-			ERRRET(out);
-		}
-		wreq.u.essid.pointer = id;
-		if (ioctl(sockfd,SIOCGIWESSID, &wreq) < 0) {
-			warn("ioctl 'SIOCGIWESSID'");
-			close(sockfd);
-			ERRRET(out);
-		}
-
-		close(sockfd);
-
-		if (!strcmp(id, ""))
-			ERRRET(out);
-
-		bprintf(out, "%s", id);
-	}
-#elif defined(__OpenBSD__)
-	#include <stdlib.h>
-	#include <net/if.h>
-	#include <sys/types.h>
-	#include <sys/select.h> /* before <sys/ieee80211_ioctl.h> for NBBY */
-	#include <net/if_media.h>
-	#include <net80211/ieee80211.h>
-	#include <net80211/ieee80211_ioctl.h>
-
-	static inline int
-	load_ieee80211_nodereq(const char *interface,
-			struct ieee80211_nodereq *nr)
-	{
-		struct ieee80211_bssid bssid;
-		int sockfd;
-		uint8_t zero_bssid[IEEE80211_ADDR_LEN];
-
-		memset(&bssid, 0, sizeof(bssid));
-		memset(nr, 0, sizeof(struct ieee80211_nodereq));
-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-			warn("socket 'AF_INET'");
-			return 0;
-		}
-		strlcpy(bssid.i_name, interface, sizeof(bssid.i_name));
-		if ((ioctl(sockfd, SIOCG80211BSSID, &bssid)) < 0) {
-			warn("ioctl 'SIOCG80211BSSID'");
-			close(sockfd);
-			return 0;
-		}
-		memset(&zero_bssid, 0, sizeof(zero_bssid));
-		if (memcmp(bssid.i_bssid, zero_bssid,
-		    IEEE80211_ADDR_LEN) == 0) {
-			close(sockfd);
-			return 0;
-		}
-		strlcpy(nr->nr_ifname, interface, sizeof(nr->nr_ifname));
-		memcpy(&nr->nr_macaddr, bssid.i_bssid, sizeof(nr->nr_macaddr));
-		if ((ioctl(sockfd, SIOCG80211NODE, nr)) < 0 && nr->nr_rssi) {
-			warn("ioctl 'SIOCG80211NODE'");
-			close(sockfd);
-			return 0;
-		}
-
-		return close(sockfd), 1;
-	}
-
-	void
-	wifi_perc(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		struct ieee80211_nodereq nr;
-		int q;
-
-		if (load_ieee80211_nodereq(interface, &nr)) {
-			if (nr.nr_max_rssi)
-				q = IEEE80211_NODEREQ_RSSI(&nr);
-			else
-				q = RSSI_TO_PERC(nr.nr_rssi);
-			bprintf(out, "%d", q);
-			return;
-		}
+	if (!eioctl(data->common.sock, SIOCGIWSTATS, &data->common.req)) {
+		close(data->common.sock);
+		data->common.sock = -1;
 		ERRRET(out);
 	}
 
-	void
-	wifi_essid(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		struct ieee80211_nodereq nr;
+	bprintf(out,
+		"%" PRIperc,
+		(percent_t)((float)data->stat.qual.qual / (70 /* max RSSI */)
+			    * 100));
+}
 
-		if (load_ieee80211_nodereq(interface, &nr)) {
-			bprintf(out, "%s", nr.nr_nwid);
-			return;
-		}
+void
+wifi_essid(char		*out,
+	   const char	      *interface,
+	   uint32_t __unused _i,
+	   static_data_t	 *static_data)
+{
+	struct wifi_essid_data *data = static_data->data;
 
+	if (!static_data->cleanup) static_data->cleanup = wifi_essid_cleanup;
+
+	if (data->common.sock <= 0) {
+		SOCKET_INIT(data, out);
+
+		strncpy(data->common.req.ifr_name,
+			interface,
+			sizeof(data->common.req.ifr_name));
+		data->common.req.u.essid.pointer = data->id;
+		data->common.req.u.essid.length	 = sizeof(data->id);
+	}
+
+	if (!eioctl(data->common.sock, SIOCGIWESSID, &data->common.req)) {
+		close(data->common.sock);
+		data->common.sock = -1;
 		ERRRET(out);
 	}
-#elif defined(__FreeBSD__)
-	#include <net/if.h>
-	#include <net80211/ieee80211_ioctl.h>
 
-	static inline int
-	load_ieee80211req(int sock, const char *interface,
-			void *data, int type, size_t *len)
-	{
-		struct ieee80211req ireq;
-		memset(&ireq, 0, sizeof(ireq));
-		ireq.i_type = type;
-		ireq.i_data = (caddr_t) data;
-		ireq.i_len = *len;
+	if (!*data->id) ERRRET(out);
 
-		strlcpy(ireq.i_name, interface, sizeof(ireq.i_name));
-		if (ioctl(sock, SIOCG80211, &ireq) < 0) {
-			warn("ioctl: 'SIOCG80211': %d", type);
-			return 0;
-		}
+	bprintf(out, "%s", data->id);
+}
 
-		*len = ireq.i_len;
-		return 1;
-	}
+static inline uint8_t
+_eioctl(const char	   *func,
+	int		  fd,
+	unsigned long int req,
+	const char	   *str_req,
+	void	     *arg)
+{
+	uint8_t		  ret;
+	static const char msg[] = "you are probably not connected to wifi";
 
-	void
-	wifi_perc(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		union {
-			struct ieee80211req_sta_req sta;
-			uint8_t buf[24 * 1024];
-		} info;
-		size_t len;
-		int sockfd;
-		int rssi_dbm;
-		uint8_t bssid[IEEE80211_ADDR_LEN];
+	if (!(ret = (ioctl(fd, req, arg) != -1)))
+		warn("%s: %s: ioctl(%d, %s, %p)", func, msg, fd, str_req, arg);
 
-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-			warn("socket 'AF_INET'");
-			ERRRET(out);
-		}
+	return ret;
+}
 
-		/* Retreive MAC address of interface */
-		len = IEEE80211_ADDR_LEN;
-		if (load_ieee80211req(sockfd, interface,
-				&bssid, IEEE80211_IOC_BSSID, &len)) {
-			/* Retrieve info on station with above BSSID */
-			memset(&info, 0, sizeof(info));
-			memcpy(info.sta.is_u.macaddr, bssid, sizeof(bssid));
+static inline int
+_esocket(const char *func, const char *args, int domain, int type, int proto)
+{
+	int ret;
 
-			len = sizeof(info);
-			if (load_ieee80211req(sockfd,
-					interface, &info,
-					IEEE80211_IOC_STA_INFO, &len)) {
-				rssi_dbm = info.sta.info[0].isi_noise +
-					         info.sta.info[0].isi_rssi / 2;
+	if ((ret = socket(domain, type, proto)) == -1)
+		warn("%s: socket(%s)", func, args);
 
-				bprintf(out, "%d", RSSI_TO_PERC(rssi_dbm));
-			}
-		}
-		close(sockfd);
-	}
+	return ret;
+}
 
-	void
-	wifi_essid(char *out, const char *interface,
-		unsigned int __unused _i, void __unused *_p)
-	{
-		size_t len;
-		int sockfd;
-		char ssid[IEEE80211_NWID_LEN + 1];
+CLEANUP(perc);
+CLEANUP(essid);
 
-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-			warn("socket 'AF_INET'");
-			ERRRET(out);
-		}
-
-		len = sizeof(ssid);
-		memset(&ssid, 0, len);
-		if (load_ieee80211req(sockfd, interface,
-				&ssid, IEEE80211_IOC_SSID, &len )) {
-			if (len < sizeof(ssid))
-				len += 1;
-			else
-				len = sizeof(ssid);
-
-			ssid[len - 1] = '\0';
-			bprintf(out, "%s", ssid);
-		}
-		close(sockfd);
-	}
-#endif

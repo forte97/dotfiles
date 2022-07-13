@@ -5,36 +5,38 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#include "../util.h"
+#include "../lib/util.h"
 
 void
-gid(char *     out,
-    const char __unused * _a,
-    unsigned int __unused _i,
-    void __unused *_p)
+gid(char		 *out,
+    const char __unused *_a,
+    uint32_t __unused	 _i,
+    void __unused	  *_p)
 {
-	bprintf(out, "%d", getgid());
+	bprintf(out, "%u", getgid());
 }
 
 void
-uid(char *     out,
-    const char __unused * _a,
-    unsigned int __unused _i,
-    void __unused *_p)
+uid(char		 *out,
+    const char __unused *_a,
+    uint32_t __unused	 _i,
+    void __unused	  *_p)
 {
-	bprintf(out, "%d", getuid());
+	bprintf(out, "%u", getuid());
 }
 
 void
-username(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+username(char		      *out,
+	 const char __unused *_a,
+	 uint32_t __unused    _i,
+	 void __unused       *_p)
 {
 	struct passwd *pw;
 
-	if (!(pw = getpwuid(getuid()))) {
-		warn("getpwuid '%d'", getuid());
+	uid_t uid = getuid();
+
+	if (!(pw = getpwuid(uid))) {
+		warn("getpwuid(%u)", uid);
 		ERRRET(out);
 	}
 

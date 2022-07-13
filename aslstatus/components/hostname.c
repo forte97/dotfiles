@@ -3,13 +3,13 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "../util.h"
+#include "../lib/util.h"
 
 void
-hostname(char *	    out,
-	 const char __unused * _a,
-	 unsigned int __unused _i,
-	 void __unused *_p)
+hostname(char		      *out,
+	 const char __unused *_a,
+	 uint32_t __unused    _i,
+	 void __unused       *_p)
 {
 	if (gethostname(out, BUFF_SZ) < 0) {
 		warnx("gethostbyname");

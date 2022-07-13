@@ -1,36 +1,58 @@
 /* See LICENSE file for copyright and license details. */
 #include <err.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <dirent.h>
+#include <limits.h>
+#include <unistd.h>
 
-#include "../util.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
 
-#if defined(__linux__)
-#	include <stdint.h>
-#	include <string.h>
-#	include <dirent.h>
-#	include <limits.h>
+#define MAX_NAME  16
+#define TEMP_FILE "temp1_input"
+#define SYS_CLASS "/sys/class/hwmon"
 
-#	define MAX_NAME 16
-static const char HWMON[] = "/sys/class/hwmon";
+static const char *GOOD_NAMES[] = {
+	"coretemp",
+	"acpitz",
+	"k10temp",
+	"fam15h_power",
+};
 
 void
-temp(char *out, const char *device, unsigned int __unused _i, void *static_ptr)
+temp(char		  *out,
+     const char	*device,
+     uint32_t __unused _i,
+     static_data_t	   *static_data)
 {
-	DIR *	       d;
-	uintmax_t      temp;
+	DIR	    *d;
 	struct dirent *dp;
-	char	       name[MAX_NAME];
-	char *	       file = static_ptr;
 
-	if (file[0]) goto get_temp;
+	uint8_t i, found = 0;
+	size_t	readed;
+	int	name_fd;
+	char	name[MAX_NAME];
+	char	buf[JU_STR_SIZE + 3 /* zeros at the end */];
+	int    *fd = static_data->data;
 
-	if (!!device) {
-		esnprintf(file, PATH_MAX, "%s/%s/temp1_input", HWMON, device);
+	if (!static_data->cleanup) static_data->cleanup = fd_cleanup;
+
+	if (*fd > 0) {
+		if (!fd_rewind(*fd)) ERRRET(out);
 		goto get_temp;
 	}
 
-	if (!(d = opendir(HWMON))) {
-		warn("opendir '%s'", HWMON);
+	if (!!device) {
+		if (!sysfs_fd_or_rewind(fd, SYS_CLASS, device, TEMP_FILE))
+			ERRRET(out);
+
+		goto get_temp;
+	}
+
+	if (!(d = opendir(SYS_CLASS))) {
+		warn("opendir(%s)", SYS_CLASS);
 		ERRRET(out);
 	}
 
@@ -38,85 +60,43 @@ temp(char *out, const char *device, unsigned int __unused _i, void *static_ptr)
 		if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, ".."))
 			continue;
 
-		esnprintf(file,
-			  PATH_MAX,
-			  "%s/%s/%s",
-			  HWMON,
-			  dp->d_name,
-			  "name");
+		if ((name_fd = sysfs_fd(SYS_CLASS, dp->d_name, "name")) == -1)
+			continue;
 
-		if (pscanf(file, "%" STR(MAX_NAME) "s", name) != 1) {
-			warn("scanf '%s'", file);
-			file[0] = '\0';
+		if (!eread_ret(readed, name_fd, WITH_LEN(name))) {
+			eclose(name_fd);
 			continue;
 		}
 
-		if (!strcmp(name, "coretemp") || !strcmp(name, "acpitz")
-		    || !strcmp(name, "k10temp")
-		    || !strcmp(name, "fam15h_power")) {
-			esnprintf(file,
-				  PATH_MAX,
-				  "%s/%s/%s",
-				  HWMON,
-				  dp->d_name,
-				  "temp1_input");
-			break;
+		/* remove last new line char */
+		name[--readed] = '\0';
+
+		for (i = 0; i < LEN(GOOD_NAMES); i++) {
+			if (!strncmp(name, GOOD_NAMES[i], readed)) {
+				if ((*fd = sysfs_fd(SYS_CLASS,
+						    dp->d_name,
+						    TEMP_FILE))
+				    == -1)
+					ERRRET(out);
+
+				found = !0;
+				goto end_loop;
+			}
 		}
 	}
+end_loop:
 	closedir(d);
-get_temp:
-	if (pscanf(file, "%ju", &temp) != 1) ERRRET(out);
-	bprintf(out, "%ju", temp / 1000);
-}
-#elif defined(__OpenBSD__)
-#	include <stdio.h>
-#	include <sys/time.h> /* before <sys/sensors.h> for struct timeval */
-#	include <sys/sysctl.h>
-#	include <sys/sensors.h>
 
-void
-temp(char *	out,
-     const char __unused * _a,
-     unsigned int __unused _i,
-     void __unused *_p)
-{
-	int	      mib[5];
-	size_t	      size;
-	struct sensor temp;
+	if (!!found) {
+	get_temp:
+		if (!eread_ret(readed, *fd, WITH_LEN(buf))) ERRRET(out);
 
-	mib[0] = CTL_HW;
-	mib[1] = HW_SENSORS;
-	mib[2] = 0; /* cpu0 */
-	mib[3] = SENSOR_TEMP;
-	mib[4] = 0; /* temp0 */
+		if (readed > 4)
+			readed -= 4; /* 3 zeros and '\n' at the end */
+		else
+			buf[(readed = 1) - 1] = '0';
 
-	size   = sizeof(temp);
-
-	if (sysctl(mib, 5, &temp, &size, NULL, 0) < 0) {
-		warn("sysctl 'SENSOR_TEMP'");
-		ERRRET(out);
+		buf[readed] = '\0';
+		bprintf(out, "%s", buf);
 	}
-
-	/* kelvin to celsius */
-	bprintf(out, "%d", (temp.value - 273150000) / 1E6);
 }
-#elif defined(__FreeBSD__)
-#	include <stdio.h>
-#	include <stdlib.h>
-#	include <sys/sysctl.h>
-
-void
-temp(char *out, const char *zone, unsigned int __unused _i, void __unused *_p)
-{
-	int    temp;
-	size_t len;
-	char   buf[256];
-
-	len = sizeof(temp);
-	snprintf(buf, sizeof(buf), "hw.acpi.thermal.%s.temperature", zone);
-	if (sysctlbyname(buf, &temp, &len, NULL, 0) == -1 || !len) ERRRET(out);
-
-	/* kelvin to decimal celcius */
-	bprintf(out, "%d.%d", (temp - 2731) / 10, abs((temp - 2731) % 10));
-}
-#endif

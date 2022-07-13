@@ -1,76 +1,55 @@
-/* See LICENSE file for copyright and license details. */
 #include <err.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "../util.h"
-#include "../components_config.h"
+#include <limits.h>
+#include <stdint.h>
+#include <unistd.h>
 
-#ifndef BATTERY_FULL
-#	define BATTERY_FULL "" /* "f" */
-#endif
+#include "battery.h"
+#include "../lib/util.h"
+#include "../aslstatus.h"
 
-#ifndef BATTERY_UNKNOWN
-#	define BATTERY_UNKNOWN "" /* "?" */
-#endif
+#define MAX_STATE     13
+#define STATE_PATTERN "%" STR(MAX_STATE) "[^\n]s"
+#define SYS_CLASS     "/sys/class/power_supply"
 
-#ifndef BATTERY_CHARGING
-#	define BATTERY_CHARGING "+" /* "+" */
-#endif
+static uint8_t pick(const char *bat, int *fd, const char **arr, size_t len);
+static uint8_t get_state(char state[MAX_STATE], int *fd, const char *bat);
+static void    battery_remaining_cleanup(void *ptr);
 
-#ifndef BATTERY_DISCHARGING
-#	define BATTERY_DISCHARGING "-" /* "-" */
-#endif
-
-#if defined(__linux__)
-#	include <limits.h>
-#	include <stdint.h>
-#	include <unistd.h>
-
-#	define MAX_STATE     13
-#	define STATE_PATTERN "%" STR(MAX_STATE) "[^\n]s"
-
-static inline const char *
-pick(
-    const char *bat, const char *f1, const char *f2, char *path, size_t length)
+void
+battery_perc(char		  *out,
+	     const char	*bat,
+	     uint32_t __unused _i,
+	     static_data_t	   *static_data)
 {
-	if (esnprintf(path, length, f1, bat) > 0 && access(path, R_OK) == 0) {
-		return f1;
-	}
+	size_t readed;
+	char   perc[4]; /* len(str(100)) + 1 */
+	int   *fd = static_data->data;
 
-	if (esnprintf(path, length, f2, bat) > 0 && access(path, R_OK) == 0) {
-		return f2;
-	}
+	if (!static_data->cleanup) static_data->cleanup = fd_cleanup;
 
-	return NULL;
+	if (!sysfs_fd_or_rewind(fd, SYS_CLASS, bat, "capacity")) ERRRET(out);
+
+	if (!eread_ret(readed, *fd, WITH_LEN(perc))) ERRRET(out);
+
+	perc[--readed /* '\n' at the end */] = '\0';
+
+	bprintf(out, "%.3s", perc);
 }
 
 void
-battery_perc(char *		   out,
-	     const char *	   bat,
-	     unsigned int __unused _i,
-	     void __unused *_p)
+battery_state(char		   *out,
+	      const char	 *bat,
+	      uint32_t __unused _i,
+	      static_data_t    *static_data)
 {
-	int  perc;
-	char path[PATH_MAX];
+	int *fd = static_data->data;
 
-	perc = esnprintf(path,
-			 sizeof(path),
-			 "/sys/class/power_supply/%s/capacity",
-			 bat);
-	if (perc < 0 || pscanf(path, "%d", &perc) != 1) { ERRRET(out); }
-
-	bprintf(out, "%d", perc);
-}
-
-void
-battery_state(char *		    out,
-	      const char *	    bat,
-	      unsigned int __unused _i,
-	      void __unused *_p)
-{
 	size_t i;
-	char   path[PATH_MAX], state[MAX_STATE];
+	char   state[MAX_STATE];
 	static const struct {
 		const char *state;
 		const char *symbol;
@@ -80,213 +59,119 @@ battery_state(char *		    out,
 		{ "Not charging", BATTERY_FULL },
 	};
 
-	if (esnprintf(path,
-		      sizeof(path),
-		      "/sys/class/power_supply/%s/status",
-		      bat)
-	    < 0) {
-		ERRRET(out);
-	}
-	if (pscanf(path, STATE_PATTERN, state) != 1) ERRRET(out);
+	if (!static_data->cleanup) static_data->cleanup = fd_cleanup;
+
+	if (!get_state(state, fd, bat)) ERRRET(out);
 
 	for (i = 0; i < LEN(map); i++)
 		if (!strcmp(map[i].state, state)) break;
+
 	bprintf(out, "%s", (i == LEN(map)) ? BATTERY_UNKNOWN : map[i].symbol);
 }
 
 void
-battery_remaining(char *		out,
-		  const char *		bat,
-		  unsigned int __unused _i,
-		  void __unused *_p)
+battery_remaining(char	       *out,
+		  const char	     *bat,
+		  uint32_t __unused _i,
+		  static_data_t	*static_data)
 {
+	struct remaining *fds = static_data->data;
+
+	char	  buf[JU_STR_SIZE];
+	char	  state[MAX_STATE];
 	uintmax_t m, h, charge_now, current_now;
-	char	  path[PATH_MAX], state[MAX_STATE];
+
+#define RESOLVE(S, F) *F = &S->F
+	int RESOLVE(fds, status), RESOLVE(fds, charge), RESOLVE(fds, current);
 
 	double timeleft;
 
-	if (esnprintf(path,
-		      sizeof(path),
-		      "/sys/class/power_supply/%s/status",
-		      bat)
-	    < 0) {
-		ERRRET(out);
-	}
-	if (pscanf(path, STATE_PATTERN, state) != 1) { ERRRET(out); }
+	static const char *charge_arr[] = {
+		"charge_now",
+		"energy_now",
+	};
+	static const char *current_arr[] = {
+		"current_now",
+		"power_now",
+	};
 
-	if (!pick(bat,
-		  "/sys/class/power_supply/%s/charge_now",
-		  "/sys/class/power_supply/%s/energy_now",
-		  path,
-		  sizeof(path))
-	    || pscanf(path, "%ju", &charge_now) < 0) {
-		ERRRET(out);
-	}
+	if (!static_data->cleanup)
+		static_data->cleanup = battery_remaining_cleanup;
+
+	if (!get_state(state, status, bat)) ERRRET(out);
+
+#define pick_scan(B, C)                                                       \
+	(pick(bat, C, C##_arr, LEN(C##_arr)) && eread(*C, WITH_LEN(buf))      \
+	 && esscanf(1, buf, "%ju", &C##_now))
 
 	if (!strcmp(state, "Discharging")) {
-		if (!pick(bat,
-			  "/sys/class/power_supply/%s/current_now",
-			  "/sys/class/power_supply/%s/power_now",
-			  path,
-			  sizeof(path))
-		    || pscanf(path, "%ju", &current_now) < 0) {
-			ERRRET(out);
-		}
+		do {
+			if (pick_scan(buf, charge) && pick_scan(buf, current))
+				break;
 
-		if (current_now == 0) { ERRRET(out); }
+			ERRRET(out);
+		} while (0);
+
+		if (!current_now) goto not_discharging;
 
 		timeleft = (double)charge_now / (double)current_now;
-		h	 = timeleft;
-		m	 = (timeleft - (double)h) * 60;
+		SAFE_ASSIGN(h, timeleft);
+		SAFE_ASSIGN(m, (timeleft - (double)h) * 60);
 
 		bprintf(out, "%juh %jum", h, m);
 		return;
 	}
-
-	ERRRET(out);
-}
-#elif defined(__OpenBSD__)
-#	include <fcntl.h>
-#	include <machine/apmvar.h>
-#	include <sys/ioctl.h>
-#	include <unistd.h>
-
-static inline int
-load_apm_power_info(struct apm_power_info *apm_info)
-{
-	int fd;
-
-	fd = open("/dev/apm", O_RDONLY);
-	if (fd < 0) {
-		warn("open '/dev/apm'");
-		return 0;
-	}
-
-	memset(apm_info, 0, sizeof(struct apm_power_info));
-	if (ioctl(fd, APM_IOC_GETPOWER, apm_info) < 0) {
-		warn("ioctl 'APM_IOC_GETPOWER'");
-		close(fd);
-		return 0;
-	}
-	return close(fd), 1;
+not_discharging:
+	bprintf(out, "%s", BATTERY_REMAINING_NOT_DISCHARGING);
 }
 
-void
-battery_perc(char *	out,
-	     const char __unused * _a,
-	     unsigned int __unused _i,
-	     void __unused *_p)
+static inline uint8_t
+pick(const char *bat, int *fd, const char **arr, size_t len)
 {
-	struct apm_power_info apm_info;
+	__typeof__(len) i;
 
-	if (load_apm_power_info(&apm_info)) {
-		bptintf(out, "%d", apm_info.battery_life);
+	uint8_t ret    = 0;
+	int	bat_fd = -1;
+
+	if (*fd > 0) return fd_rewind(*fd);
+
+	if ((bat_fd = sysfs_fd(SYS_CLASS, bat, NULL)) == -1) return 0;
+
+	for (i = 0; i < len; i++) {
+		if ((*fd = openat(bat_fd, arr[i], O_RDONLY | O_CLOEXEC))
+		    != -1) {
+			ret = !0;
+			goto end;
+		}
 	}
 
-	ERRRET(out);
+end:
+	if (bat_fd != -1) eclose(bat_fd);
+	return ret;
 }
 
-void
-battery_state(char *	 out,
-	      const char __unused * _a,
-	      unsigned int __unused _i,
-	      void __unused *_p)
+static inline uint8_t
+get_state(char state[MAX_STATE], int *fd, const char *bat)
 {
-	struct {
-		unsigned int state;
-		char *	     symbol;
-	} map[] = {
-		{ APM_AC_ON, BATTERY_CHARGING },
-		{ APM_AC_OFF, BATTERY_DISCHARGING },
+	size_t readed;
+
+	if (!sysfs_fd_or_rewind(fd, SYS_CLASS, bat, "status")) return 0;
+	if (!eread_ret(readed, *fd, state, MAX_STATE)) return !0;
+
+	state[--readed /* '\n' at the end */] = '\0';
+
+	return !0;
+}
+
+static inline void
+battery_remaining_cleanup(void *ptr)
+{
+	int fds[] = {
+		((struct remaining *)ptr)->status,
+		((struct remaining *)ptr)->charge,
+		((struct remaining *)ptr)->current,
 	};
 
-	size_t i;
-
-	struct apm_power_info apm_info;
-
-	if (!load_apm_power_info(&apm_info)) ERRRET(out);
-
-	for (i = 0; i < LEN(map); i++) {
-		if (map[i].state == apm_info.ac_state) break;
-	}
-
-	bprintf(out, (i == LEN(map)) ? BATTERY_UNKNOWN : map[i].symbol);
+	for (uint8_t i = 0; i < LEN(fds); i++)
+		if (!!fds[i]) eclose(fds[i]);
 }
-
-void
-battery_remaining(char *     out,
-		  const char __unused * _a,
-		  unsigned int __unused _i,
-		  void __unused *_p)
-{
-	struct apm_power_info apm_info;
-
-	if (load_apm_power_info(&apm_info))
-		if (apm_info.ac_state != APM_AC_ON) {
-			bptintf(out,
-				"%uh %02um",
-				apm_info.minutes_left / 60,
-				apm_info.minutes_left % 60);
-			return;
-		}
-	ERRRET(out);
-}
-#elif defined(__FreeBSD__)
-#	include <sys/sysctl.h>
-
-void
-battery_perc(char *out, const char *unused)
-{
-	int    cap;
-	size_t len;
-
-	len = sizeof(cap);
-	if (sysctlbyname("hw.acpi.battery.life", &cap, &len, NULL, 0) == -1
-	    || !len)
-		ERRRET(out);
-
-	bptintf(out, "%d", cap);
-}
-
-void
-battery_state(char *	 out,
-	      const char __unused * _a,
-	      unsigned int __unused _i,
-	      void __unused *_p)
-{
-	int    state;
-	size_t len;
-
-	len = sizeof(state);
-	if (sysctlbyname("hw.acpi.battery.state", &state, &len, NULL, 0) == -1
-	    || !len)
-		ERRRET(out);
-
-	switch (state) {
-	case 0:
-	case 2:
-		bprintf(out, BATTERY_CHARGING);
-	case 1:
-		bprintf(out, BATTERY_DISCHARGING);
-	default:
-		bprintf(out, BATTERY_UNKNOWN);
-	}
-}
-
-void
-battery_remaining(char *     out,
-		  const char __unused * f,
-		  unsigned int __unused i,
-		  void __unused *p)
-{
-	int    rem;
-	size_t len;
-
-	len = sizeof(rem);
-	if (sysctlbyname("hw.acpi.battery.time", &rem, &len, NULL, 0) == -1
-	    || !len || rem == -1)
-		ERRRET(out);
-
-	bptintf(out, "%uh %02um", rem / 60, rem % 60);
-}
-#endif
