@@ -50,7 +50,7 @@ fi
 
 
 #DISPLAY
-xrandr --output DP-1 --mode 1920x1080 --rate 144 &
+xrandr --output DisplayPort-0 --mode 1920x1080 --rate 144 &
 
 #PIPEWIRE
 /usr/bin/pipewire &
@@ -70,8 +70,8 @@ nitrogen --restore &
 aslstatus &
 
 #LOOP
-while true; do
-    dwm >/dev/null 2>&1
-done
+#while true; do
+#    dwm >/dev/null 2>&1
+#done
 #DWM
 exec dwm
