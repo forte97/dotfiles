@@ -57,12 +57,6 @@ xrandr --output DisplayPort-0 --mode 1920x1080 --rate 144 &
 /usr/bin/pipewire-pulse &
 /usr/bin/wireplumber &
 
-#LXPOLKIT
-/usr/bin/lxpolkit &
-
-#PICOM
-picom --no-fading-openclose &
-
 #NITROGEN
 nitrogen --restore &
 
